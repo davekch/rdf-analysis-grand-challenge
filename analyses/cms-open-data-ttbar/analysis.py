@@ -7,6 +7,7 @@ from typing import Optional, Tuple
 import ml
 import ROOT
 from distributed import Client, LocalCluster, SSHCluster, get_worker
+from dask_jobqueue import SLURMCluster
 from ml import (
     define_features,
     infer_output_ml_features,
@@ -71,7 +72,7 @@ def parse_args() -> argparse.Namespace:
                 The default is `mt`, i.e. multi-thread execution.
                 If dask-ssh, a list of worker node hostnames to connect to should be provided via the --nodes option.""",
         default="mt",
-        choices=["mt", "dask-local", "dask-ssh"],
+        choices=["mt", "dask-local", "dask-ssh", "slurm-lmu"],
     )
     p.add_argument(
         "--ncores",
@@ -113,6 +114,16 @@ def create_dask_client(scheduler: str, ncores: int, hosts: str) -> Client:
             worker_options={"nprocs": ncores, "nthreads": 1, "memory_limit": "32GB"},
         )
         return Client(sshc)
+    
+    if scheduler == "slurm-lmu":
+        cluster = SLURMCluster(
+            cores=1,
+            queue="ls-schaile",
+            memory="3.0GB",
+            n_workers=ncores
+        )
+        return Client(cluster)
+
 
     raise ValueError(
         f"Unexpected scheduling mode '{scheduler}'. Valid modes are ['dask-local', 'dask-ssh']."
@@ -354,6 +365,7 @@ def main() -> None:
     else:
         # Setup for distributed RDataFrame
         client = create_dask_client(args.scheduler, args.ncores, args.hosts)
+        print(f"see dask dashboard at {client.dashboard_link}")
         if args.inference:
             ROOT.RDF.Experimental.Distributed.initialize(load_cpp)
             if args.inference:
