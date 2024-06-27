@@ -6,3 +6,5 @@ dependencies:
   - python>=3.9
   - root-nightly
   - distributed
+  - dask-jobqueue
+  - bokeh!=3.0.*,>=2.4.2
