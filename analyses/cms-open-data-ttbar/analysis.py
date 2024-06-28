@@ -54,6 +54,12 @@ def parse_args() -> argparse.Namespace:
                 `--remote-data-prefix='root://eospublic.cern.ch//eos/root-eos/AGC'`.""",
     )
     p.add_argument(
+        "--input",
+        "-i",
+        help="json file with paths to ntuples",
+        default="nanoaod_inputs.json",
+    )
+    p.add_argument(
         "--output",
         "-o",
         help="Name of the file where analysis results will be stored. If it already exists, contents are overwritten.",
@@ -377,7 +383,7 @@ def main() -> None:
 
     # Book RDataFrame results
     inputs: list[AGCInput] = retrieve_inputs(
-        args.n_max_files_per_sample, args.remote_data_prefix, args.data_cache
+        args.n_max_files_per_sample, args.remote_data_prefix, args.data_cache, args.input
     )
     results: list[AGCResult] = []
     ml_results: list[AGCResult] = []
