@@ -5,6 +5,7 @@
 *.pcm
 *.d
 *.so
+**/slurm-*.out
 data.json
 __pycache__
 tags
