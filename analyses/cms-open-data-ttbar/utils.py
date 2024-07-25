@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Union
 from urllib.request import urlretrieve
+import os
+import time
 
 import ROOT
 from tqdm import tqdm
@@ -147,3 +149,46 @@ def save_histos(results: list[ROOT.TH1D], output_fname: str):
     with ROOT.TFile.Open(output_fname, "recreate") as out_file:
         for result in results:
             out_file.WriteObject(result, result.GetName().replace("_nominal", ""))
+
+
+def save_metrics(
+    inputs: list[AGCInput],
+    scheduler: str,
+    graph_build_time: float,
+    graph_execution_time: float,
+    num_workers: int,
+    use_dask: bool = True,
+):
+    # take a filename from the inputs to determine the dataset source
+    file_name = inputs[0].paths[0]
+    if file_name.startswith("root://lcg-lrz-xcache2.grid.lrz.de"):
+        dataset_source = "LRZ XCache"
+    elif file_name.startswith("root://lcg-lrz-rootd.grid.lrz.de"):
+        dataset_source = "LRZ"
+    else:
+        dataset_source = file_name
+    if scheduler == "slurm-ls-schaile":
+        af_name = "lmu"
+    elif scheduler == "slurm-agkuhr":
+        af_name = "lmu-agkuhr"
+    else:
+        af_name = scheduler
+
+    metrics = {
+        "af": af_name,
+        "dataset_source": dataset_source,
+        "graph_build_time": graph_build_time,
+        "graph_execution_time": graph_execution_time,
+        "walltime": graph_build_time + graph_execution_time,
+        "num_workers": num_workers,
+        "use_dask": use_dask,
+    }
+    if not os.path.exists("metrics"):
+        os.makedirs("metrics")
+        with open("metrics/.gitignore", "w") as ignore:
+            ignore.write("*")
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    file_name = f"metrics/{af_name}-{timestamp}.json"
+    with open(file_name, "w") as f:
+        json.dump(metrics, f)
+    print(f"saved metrics to {file_name}")

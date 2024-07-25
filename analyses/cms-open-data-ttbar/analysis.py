@@ -20,6 +20,7 @@ from utils import (
     postprocess_results,
     retrieve_inputs,
     save_histos,
+    save_metrics,
 )
 
 # Using https://atlas-groupdata.web.cern.ch/atlas-groupdata/dev/AnalysisTop/TopDataPreparation/XSection-MC15-13TeV.data
@@ -381,6 +382,7 @@ def main() -> None:
             ROOT.RDF.Experimental.Distributed.initialize(load_cpp)
         run_graphs = ROOT.RDF.Experimental.Distributed.RunGraphs
 
+    analysis_start = time()  # this timer does not include waiting for dask workers
     # Book RDataFrame results
     inputs: list[AGCInput] = retrieve_inputs(
         args.n_max_files_per_sample, args.remote_data_prefix, args.data_cache, args.input
@@ -405,13 +407,23 @@ def main() -> None:
         if r.should_vary:
             r.histo = variationsfor_func(r.histo)
 
-    print(f"Building the computation graphs took {time() - program_start:.2f} seconds")
+    graph_build_time = time() - analysis_start
+    print(f"Building the computation graphs took {graph_build_time:.2f} seconds")
 
     # Run the event loops for all processes and variations here
     run_graphs_start = time()
     run_graphs([r.nominal_histo for r in results + ml_results])
 
-    print(f"Executing the computation graphs took {time() - run_graphs_start:.2f} seconds")
+    graph_execution_time = time() - run_graphs_start
+    print(f"Executing the computation graphs took {graph_execution_time:.2f} seconds")
+    save_metrics(
+        inputs=inputs,
+        scheduler=args.scheduler,
+        graph_build_time=graph_build_time,
+        graph_execution_time=graph_execution_time,
+        num_workers=args.ncores,
+        use_dask=args.scheduler != "mt",
+    )
     if client is not None:
         client.close()
 
