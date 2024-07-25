@@ -1,7 +1,7 @@
 import argparse
 import os
 from pathlib import Path
-from time import time
+from time import time, sleep
 from typing import Optional, Tuple
 
 import ml
@@ -89,6 +89,11 @@ def parse_args() -> argparse.Namespace:
         ),
         default=len(os.sched_getaffinity(0)),
         type=int,
+    )
+    p.add_argument(
+        "--wait-for-workers",
+        help="Don't start analysis until 90% of the requested workers are up",
+        action=argparse.BooleanOptionalAction,
     )
     p.add_argument(
         "--npartitions",
@@ -373,6 +378,10 @@ def main() -> None:
         # Setup for distributed RDataFrame
         client = create_dask_client(args.scheduler, args.ncores, args.hosts)
         print(f"see dask dashboard at {client.dashboard_link}")
+        if args.wait_for_workers:
+            while (ncores_up := len(client.ncores())) < 0.9 * args.ncores:
+                print(f"waiting for workers... ({ncores_up}/{args.ncores} up)")
+                sleep(10)
         if args.inference:
             ROOT.RDF.Experimental.Distributed.initialize(load_cpp)
             if args.inference:
