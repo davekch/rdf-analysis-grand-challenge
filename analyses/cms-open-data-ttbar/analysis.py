@@ -79,7 +79,7 @@ def parse_args() -> argparse.Namespace:
                 The default is `mt`, i.e. multi-thread execution.
                 If dask-ssh, a list of worker node hostnames to connect to should be provided via the --nodes option.""",
         default="mt",
-        choices=["mt", "dask-local", "dask-ssh", "slurm-lmu"],
+        # choices=["mt", "dask-local", "dask-ssh"],
     )
     p.add_argument(
         "--ncores",
@@ -127,10 +127,11 @@ def create_dask_client(scheduler: str, ncores: int, hosts: str) -> Client:
         )
         return Client(sshc)
     
-    if scheduler == "slurm-lmu":
+    if scheduler.startswith("slurm-"):
+        queue = scheduler[6:]   # remove "slurm-"
         cluster = SLURMCluster(
             cores=1,
-            queue="ls-schaile",
+            queue=queue,
             memory="3.0GB",
             n_workers=ncores
         )
