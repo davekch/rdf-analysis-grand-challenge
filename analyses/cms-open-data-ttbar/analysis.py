@@ -1,5 +1,5 @@
 import argparse
-import os
+import multiprocessing
 from pathlib import Path
 from time import time, sleep
 from typing import Optional, Tuple
@@ -14,6 +14,7 @@ from ml import (
     ml_features_config,
 )
 from plotting import save_ml_plots, save_plots
+from statistical import fit_histograms
 from utils import (
     AGCInput,
     AGCResult,
@@ -79,7 +80,11 @@ def parse_args() -> argparse.Namespace:
                 The default is `mt`, i.e. multi-thread execution.
                 If dask-ssh, a list of worker node hostnames to connect to should be provided via the --nodes option.""",
         default="mt",
-        # choices=["mt", "dask-local", "dask-ssh"],
+        choices=["mt", "dask-local", "dask-ssh", "dask-remote"],
+    )
+    p.add_argument(
+        "--scheduler-address",
+        help="Full address of the Dask scheduler, passed as argument to the distributed.Client object. If this argument is provided, the 'dask-remote' scheduler must be chosen, and it is a required argument in such case.",
     )
     p.add_argument(
         "--ncores",
@@ -87,7 +92,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Number of cores to use. In case of distributed execution this is the amount of cores per node."
         ),
-        default=len(os.sched_getaffinity(0)),
+        default=multiprocessing.cpu_count(),
         type=int,
     )
     p.add_argument(
@@ -104,12 +109,29 @@ def parse_args() -> argparse.Namespace:
         "--hosts",
         help="A comma-separated list of worker node hostnames. Only required if --scheduler=dask-ssh, ignored otherwise.",
     )
-    p.add_argument("-v", "--verbose", help="Turn on verbose execution logs.", action="store_true")
+    p.add_argument(
+        "-v",
+        "--verbose",
+        help="Turn on verbose execution logs.",
+        action="store_true",
+    )
+
+    p.add_argument(
+        "--statistical-validation",
+        help = argparse.SUPPRESS,
+        action="store_true",
+    )
+
+    p.add_argument(
+        "--no-fitting",
+        help="Do not run statistical validation part of the analysis.",
+        action="store_true",
+    )
 
     return p.parse_args()
 
 
-def create_dask_client(scheduler: str, ncores: int, hosts: str) -> Client:
+def create_dask_client(scheduler: str, ncores: int, hosts: str, scheduler_address: str) -> Client:
     """Create a Dask distributed client."""
     if scheduler == "dask-local":
         lc = LocalCluster(n_workers=ncores, threads_per_worker=1, processes=True)
@@ -123,7 +145,11 @@ def create_dask_client(scheduler: str, ncores: int, hosts: str) -> Client:
         sshc = SSHCluster(
             workers,
             connect_options={"known_hosts": None},
-            worker_options={"nprocs": ncores, "nthreads": 1, "memory_limit": "32GB"},
+            worker_options={
+                "nprocs": ncores,
+                "nthreads": 1,
+                "memory_limit": "32GB",
+            },
         )
         return Client(sshc)
     
@@ -138,28 +164,12 @@ def create_dask_client(scheduler: str, ncores: int, hosts: str) -> Client:
         return Client(cluster)
 
 
+    if scheduler == "dask-remote":
+        return Client(scheduler_address)
+
     raise ValueError(
-        f"Unexpected scheduling mode '{scheduler}'. Valid modes are ['dask-local', 'dask-ssh']."
+        f"Unexpected scheduling mode '{scheduler}'. Valid modes are ['dask-local', 'dask-ssh', 'dask-remote']."
     )
-
-
-def make_rdf(
-    files: list[str], client: Optional[Client], npartitions: Optional[int]
-) -> ROOT.RDataFrame:
-    """Construct and return a dataframe or, if a dask client is present, a distributed dataframe."""
-    if client is not None:
-        d = ROOT.RDF.Experimental.Distributed.Dask.RDataFrame(
-            "Events", files, daskclient=client, npartitions=npartitions
-        )
-        d._headnode.backend.distribute_unique_paths(
-            [
-                "helpers.h",
-                "ml_helpers.cpp",
-            ]
-        )
-        return d
-
-    return ROOT.RDataFrame("Events", files)
 
 
 def define_trijet_mass(df: ROOT.RDataFrame) -> ROOT.RDataFrame:
@@ -169,7 +179,10 @@ def define_trijet_mass(df: ROOT.RDataFrame) -> ROOT.RDataFrame:
     df = df.Filter("Sum(Jet_btagCSVV2_cut > 0.5) > 1")
 
     # Build four-momentum vectors for each jet
-    df = df.Define("Jet_p4", "ConstructP4(Jet_pt_cut, Jet_eta_cut, Jet_phi_cut, Jet_mass_cut)")
+    df = df.Define(
+        "Jet_p4",
+        "ConstructP4(Jet_pt_cut, Jet_eta_cut, Jet_phi_cut, Jet_mass_cut)",
+    )
 
     # Build trijet combinations
     df = df.Define("Trijet_idx", "Combinations(Jet_pt_cut, 3)")
@@ -227,7 +240,7 @@ def book_histos(
         # pt_res_up(jet_pt) - jet resolution systematic
         df = df.Vary(
             "Jet_pt",
-            "ROOT::RVec<ROOT::RVecF>{Jet_pt*pt_scale_up(), Jet_pt*jet_pt_resolution(Jet_pt.size())}",
+            "ROOT::RVec<ROOT::RVecF>{Jet_pt*pt_scale_up(), Jet_pt*jet_pt_resolution(Jet_pt)}",
             ["pt_scale_up", "pt_res_up"],
         )
 
@@ -240,7 +253,7 @@ def book_histos(
             )
 
     # Event selection - the core part of the algorithm applied for both regions
-    # Selecting events containing at least one lepton and four jets with pT > 25 GeV
+    # Selecting events containing at least one lepton and four jets with pT > 30 GeV
     # Applying requirement at least one of them must be b-tagged jet (see details in the specification)
     df = (
         df.Define(
@@ -281,8 +294,7 @@ def book_histos(
     # Only one b-tagged region required
     # The observable is the total transvesre momentum
     # fmt: off
-    df4j1b = df.Filter("Sum(Jet_btagCSVV2_cut > 0.5) == 1")\
-               .Define("HT", "Sum(Jet_pt_cut)")
+    df4j1b = df.Filter("Sum(Jet_btagCSVV2_cut > 0.5) == 1").Define("HT", "Sum(Jet_pt_cut)")
     # fmt: on
 
     # Define trijet_mass observable for the 4j2b region (this one is more complicated)
@@ -292,14 +304,36 @@ def book_histos(
     results = []
     for df, observable, region in zip([df4j1b, df4j2b], ["HT", "Trijet_mass"], ["4j1b", "4j2b"]):
         histo_model = ROOT.RDF.TH1DModel(
-            name=f"{region}_{process}_{variation}", title=process, nbinsx=25, xlow=50, xup=550
+            name=f"{region}_{process}_{variation}",
+            title=process,
+            nbinsx=25,
+            xlow=50,
+            xup=550,
         )
         nominal_histo = df.Histo1D(histo_model, observable, "Weights")
 
         if variation == "nominal":
-            results.append(AGCResult(nominal_histo, region, process, variation, nominal_histo, should_vary=True))
+            results.append(
+                AGCResult(
+                    nominal_histo,
+                    region,
+                    process,
+                    variation,
+                    nominal_histo,
+                    should_vary=True,
+                )
+            )
         else:
-            results.append(AGCResult(nominal_histo, region, process, variation, nominal_histo, should_vary=False))
+            results.append(
+                AGCResult(
+                    nominal_histo,
+                    region,
+                    process,
+                    variation,
+                    nominal_histo,
+                    should_vary=False,
+                )
+            )
         print(f"Booked histogram {histo_model.fName}")
 
     ml_results: list[AGCResult] = []
@@ -307,11 +341,11 @@ def book_histos(
     if not inference:
         return (results, ml_results)
 
-    df4j2b = define_features(df4j2b)
-    df4j2b = infer_output_ml_features(df4j2b)
+    df4j2b = ml.define_features(df4j2b)
+    df4j2b = ml.infer_output_ml_features(df4j2b)
 
     # Book histograms and, if needed, their systematic variations
-    for i, feature in enumerate(ml_features_config):
+    for i, feature in enumerate(ml.ml_features_config):
         histo_model = ROOT.RDF.TH1DModel(
             name=f"{feature.name}_{process}_{variation}",
             title=feature.title,
@@ -324,11 +358,25 @@ def book_histos(
 
         if variation == "nominal":
             ml_results.append(
-                AGCResult(nominal_histo, feature.name, process, variation, nominal_histo, should_vary=True)
+                AGCResult(
+                    nominal_histo,
+                    feature.name,
+                    process,
+                    variation,
+                    nominal_histo,
+                    should_vary=True,
+                )
             )
         else:
             ml_results.append(
-                AGCResult(nominal_histo, feature.name, process, variation, nominal_histo, should_vary=False)
+                AGCResult(
+                    nominal_histo,
+                    feature.name,
+                    process,
+                    variation,
+                    nominal_histo,
+                    should_vary=False,
+                )
             )
         print(f"Booked histogram {histo_model.fName}")
 
@@ -348,7 +396,95 @@ def load_cpp():
         # must be local execution
         cpp_source = "helpers.h"
 
-    ROOT.gSystem.CompileMacro(str(cpp_source), "kO")
+    ROOT.gInterpreter.Declare(f'#include "{str(cpp_source)}"')
+
+
+def run_mt(
+    program_start: float,
+    args: argparse.Namespace,
+    inputs: list[AGCInput],
+    results: list[AGCResult],
+    ml_results: list[AGCResult],
+) -> None:
+    ROOT.EnableImplicitMT(args.ncores)
+    print(f"Number of threads: {ROOT.GetThreadPoolSize()}")
+    load_cpp()
+    if args.inference:
+        ml.load_cpp()
+
+    for input in inputs:
+        df = ROOT.RDataFrame("Events", input.paths)
+        hist_list, ml_hist_list = book_histos(
+            df, input.process, input.variation, input.nevents, inference=args.inference
+        )
+        results += hist_list
+        ml_results += ml_hist_list
+
+    for r in results + ml_results:
+        if r.should_vary:
+            r.histo = ROOT.RDF.Experimental.VariationsFor(r.histo)
+
+    print(f"Building the computation graphs took {time() - program_start:.2f} seconds")
+
+    # Run the event loops for all processes and variations here
+    run_graphs_start = time()
+    ROOT.RDF.RunGraphs([r.nominal_histo for r in results + ml_results])
+
+    print(f"Executing the computation graphs took {time() - run_graphs_start:.2f} seconds")
+
+
+def run_distributed(
+    program_start: float,
+    args: argparse.Namespace,
+    inputs: list[AGCInput],
+    results: list[AGCResult],
+    ml_results: list[AGCResult],
+) -> None:
+    if args.inference:
+
+        def ml_init():
+            load_cpp()
+            ml.load_cpp()
+
+        ROOT.RDF.Experimental.Distributed.initialize(ml_init)
+    else:
+        ROOT.RDF.Experimental.Distributed.initialize(load_cpp)
+
+    scheduler_address = args.scheduler_address if args.scheduler_address else ""
+    with create_dask_client(args.scheduler, args.ncores, args.hosts, scheduler_address) as client:
+        for input in inputs:
+            df = ROOT.RDF.Experimental.Distributed.Dask.RDataFrame(
+                "Events",
+                input.paths,
+                daskclient=client,
+                npartitions=args.npartitions,
+            )
+            df._headnode.backend.distribute_unique_paths(
+                [
+                    "helpers.h",
+                    "ml_helpers.h",
+                    "ml.py",
+                    "models/bdt_even.root",
+                    "models/bdt_odd.root",
+                ]
+            )
+            hist_list, ml_hist_list = book_histos(
+                df, input.process, input.variation, input.nevents, inference=args.inference
+            )
+            results += hist_list
+            ml_results += ml_hist_list
+
+        for r in results + ml_results:
+            if r.should_vary:
+                r.histo = ROOT.RDF.Experimental.Distributed.VariationsFor(r.histo)
+
+        print(f"Building the computation graphs took {time() - program_start:.2f} seconds")
+
+        # Run the event loops for all processes and variations here
+        run_graphs_start = time()
+        ROOT.RDF.Experimental.Distributed.RunGraphs([r.nominal_histo for r in results + ml_results])
+
+        print(f"Executing the computation graphs took {time() - run_graphs_start:.2f} seconds")
 
 
 def main() -> None:
@@ -363,18 +499,12 @@ def main() -> None:
     if args.verbose:
         # Set higher RDF verbosity for the rest of the program.
         # To only change the verbosity in a given scope, use ROOT.Experimental.RLogScopedVerbosity.
-        ROOT.Detail.RDF.RDFLogChannel.SetVerbosity(ROOT.Experimental.ELogLevel.kInfo)
+        ROOT.Detail.RDF.RDFLogChannel().SetVerbosity(ROOT.Experimental.ELogLevel.kInfo)
 
-    if args.scheduler == "mt":
-        # Setup for local, multi-thread RDataFrame
-        ROOT.EnableImplicitMT(args.ncores)
-        print(f"Number of threads: {ROOT.GetThreadPoolSize()}")
-        client = None
-        load_cpp()
-        if args.inference:
-            ml.load_cpp("./fastforest")
+    if args.statistical_validation:
+        fit_histograms(filename=args.output)
+        return
 
-        run_graphs = ROOT.RDF.RunGraphs
     else:
         # Setup for distributed RDataFrame
         client = create_dask_client(args.scheduler, args.ncores, args.hosts)
@@ -400,19 +530,18 @@ def main() -> None:
     results: list[AGCResult] = []
     ml_results: list[AGCResult] = []
 
-    for input in inputs:
-        df = make_rdf(input.paths, client, args.npartitions)
-        hist_list, ml_hist_list = book_histos(
-            df, input.process, input.variation, input.nevents, inference=args.inference
-        )
-        results += hist_list
-        ml_results += ml_hist_list
-
-    # Select the right VariationsFor function depending on RDF or DistRDF
-    if "DistRDF" in type(df).__module__:
-        variationsfor_func = ROOT.RDF.Experimental.Distributed.VariationsFor
+    if args.scheduler == "mt":
+        run_mt(program_start, args, inputs, results, ml_results)
     else:
-        variationsfor_func = ROOT.RDF.Experimental.VariationsFor
+        if args.scheduler == "dask-remote" and not args.scheduler_address:
+            raise ValueError(
+                "'dask-remote' option chosen but no address provided for the scheduler. Provide it with `--scheduler-address`."
+            )
+        if args.scheduler_address and args.scheduler != "dask-remote":
+            raise ValueError(
+                f"An address of a Dask scheduler was provided but the chosen scheduler is '{args.scheduler}'. The 'dask-remote' scheduler must be chosen if an address is provided."
+            )
+        run_distributed(program_start, args, inputs, results, ml_results)
     for r in results + ml_results:
         if r.should_vary:
             r.histo = variationsfor_func(r.histo)
@@ -448,6 +577,9 @@ def main() -> None:
         output_fname = args.output.split(".root")[0] + "_ml_inference.root"
         save_histos([r.histo for r in ml_results], output_fname=output_fname)
         print(f"Result histograms from ML inference step saved in file {output_fname}")
+
+    if not args.no_fitting:
+        fit_histograms(filename=args.output)
 
 
 if __name__ == "__main__":

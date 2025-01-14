@@ -1,8 +1,9 @@
-import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Tuple
 
 import ROOT
+from distributed import get_worker
 
 # histogram bin lower limit to use for each ML input feature
 bin_low = [0, 0, 0, 0, 50, 50, 50, 50, 25, 25, 25, 25, 0, 0, 0, 0, -1, -1, -1, -1]
@@ -74,53 +75,37 @@ ml_features_config: list[MLHistoConf] = [
 ]
 
 
-def load_cpp(fastforest_path, max_n_jets=6):
-    # the default value of max_n_jets is the same as in the refererence implementation
+def load_cpp(max_n_jets=6):
+    # the default value of max_n_jets is the same as in the reference implementation
     # https://github.com/iris-hep/analysis-grand-challenge
+    try:
+        # when using distributed RDataFrame the header is copied to the local_directory
+        # of every worker (via `distribute_unique_paths`)
+        localdir = get_worker().local_directory
+        cpp_source = Path(localdir) / "ml_helpers.h"
+        model_even_path = Path(localdir) / "bdt_even.root"
+        model_odd_path = Path(localdir) / "bdt_odd.root"
+    except ValueError:
+        # must be local execution
+        cpp_source = "ml_helpers.h"
+        model_even_path = "models/bdt_even.root"
+        model_odd_path = "models/bdt_odd.root"
 
-    # For compiling ml_helpers.cpp, it is necessary to set paths for FastForest (https://github.com/guitargeek/XGBoost-FastForest) libraries and headers.
-
-    # The installed library is supposed to look like this:
-    # fastforest_path/
-    # ├── include
-    # │   └── fastforest.h
-    # └── lib
-    #     ├── libfastforest.so -> libfastforest.so.1
-    #     ├── libfastforest.so.0.2
-    #     └── libfastforest.so.1 -> libfastforest.so.0.2
-
-    include = os.path.join(fastforest_path, "include")  # path for headers
-    lib = os.path.join(fastforest_path, "lib")  # path for libraries
-    ROOT.gSystem.AddIncludePath(f"-I{include}")
-    ROOT.gSystem.AddLinkedLibs(f"-L{lib} -lfastforest")
-    ROOT.gSystem.Load(f"{lib}/libfastforest.so.1")
-    ROOT.gSystem.CompileMacro("ml_helpers.cpp", "kO")
-
+    ROOT.gInterpreter.Declare(f'#include "{cpp_source}"')
     # Initialize FastForest models.
     # Our BDT models have 20 input features according to the AGC documentation
     # https://agc.readthedocs.io/en/latest/taskbackground.html#machine-learning-component
 
-    ROOT.gInterpreter.Declare(
-        # **Conditional derectives used to avoid redefinition error during distributed computing**
-        # Note:
-        # * moving all stuff in `Declare` to `ml_helpers.cpp` cancels the necessity of using `ifndef`
-        # * coming soon feature is `gInterpreter.Declare` with automatic header guards
-        # https://indico.fnal.gov/event/23628/contributions/240608/attachments/154873/201557/distributed_RDF_padulano_ROOT_workshop_2022.pdf
-        """
+    ROOT.gInterpreter.ProcessLine(
+        f"""
         #ifndef AGC_MODELS
         #define AGC_MODELS
-
-        const std::map<std::string, fastforest::FastForest> fastforest_models = get_fastforests("models/");
-        const fastforest::FastForest& feven = fastforest_models.at("even");
-        const fastforest::FastForest& fodd = fastforest_models.at("odd");
-        """.__add__(
-            f"""
-        size_t max_n_jets = {max_n_jets};
-        std::map<int, std::vector<ROOT::RVecI>> permutations = get_permutations_dict(max_n_jets);
-
+        const static TMVA::Experimental::RBDT model_even{{"feven", "{model_even_path}"}};
+        const static TMVA::Experimental::RBDT model_odd{{"fodd", "{model_odd_path}"}};
+        const static std::size_t max_n_jets = {max_n_jets};
+        const static auto permutations = get_permutations_dict(max_n_jets);
         #endif
         """
-        )
     )
 
 
@@ -160,8 +145,8 @@ def predict_proba(df: ROOT.RDataFrame) -> ROOT.RDataFrame:
         "proba",
         """
         bool is_even = (event % 2 == 0);
-        const auto& forest = (is_even) ? fodd : feven;
-        return inference(features, forest);
+        const auto& model = (is_even) ? model_odd : model_even;
+        return inference(features, model);
         """,
     )
 

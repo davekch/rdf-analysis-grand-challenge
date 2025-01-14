@@ -1,4 +1,3 @@
-*.root
 *.pdf
 *.npz
 *.png
@@ -9,3 +8,6 @@
 data.json
 __pycache__
 tags
+analyses/cms-open-data-ttbar/*.root
+analyses/cms-open-data-ttbar/*.table
+analyses/cms-open-data-ttbar/statistical_data/*
