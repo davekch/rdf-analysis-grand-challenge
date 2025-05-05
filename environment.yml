@@ -1,10 +1,9 @@
 name: root-agc
 channels:
-  - https://root.cern/download/conda-nightly/latest
   - conda-forge
 dependencies:
   - python>=3.9
-  - root-nightly
+  - root
   - distributed
   - dask-jobqueue
   - bokeh!=3.0.*,>=2.4.2

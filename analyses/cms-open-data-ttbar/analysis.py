@@ -80,7 +80,7 @@ def parse_args() -> argparse.Namespace:
                 The default is `mt`, i.e. multi-thread execution.
                 If dask-ssh, a list of worker node hostnames to connect to should be provided via the --nodes option.""",
         default="mt",
-        choices=["mt", "dask-local", "dask-ssh", "dask-remote"],
+        # choices=["mt", "dask-local", "dask-ssh", "dask-remote"],
     )
     p.add_argument(
         "--scheduler-address",
@@ -131,7 +131,7 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def create_dask_client(scheduler: str, ncores: int, hosts: str, scheduler_address: str) -> Client:
+def create_dask_client(scheduler: str, ncores: int, hosts: str, scheduler_address: str=None) -> Client:
     """Create a Dask distributed client."""
     if scheduler == "dask-local":
         lc = LocalCluster(n_workers=ncores, threads_per_worker=1, processes=True)
